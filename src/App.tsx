@@ -5,6 +5,10 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import SearchVisualizer from "./pages/SearchVisualizer.tsx";
+import TicTacToe from "./pages/TicTacToe.tsx";
+import TSPVisualizer from "./pages/TSPVisualizer.tsx";
+import MapColoring from "./pages/MapColoring.tsx";
 
 const queryClient = new QueryClient();
 
@@ -16,7 +20,10 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Index />} />
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+          <Route path="/search/:algo" element={<SearchVisualizer />} />
+          <Route path="/game/minimax" element={<TicTacToe />} />
+          <Route path="/tsp/tsp" element={<TSPVisualizer />} />
+          <Route path="/csp/map-coloring" element={<MapColoring />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
