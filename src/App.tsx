@@ -23,6 +23,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/search/:algo" element={<SearchVisualizer />} />
           <Route path="/game/minimax" element={<TicTacToe />} />
+          <Route path="/game/minimax-tree" element={<MinimaxTree />} />
           <Route path="/tsp/tsp" element={<TSPVisualizer />} />
           <Route path="/csp/map-coloring" element={<MapColoring />} />
           <Route path="*" element={<NotFound />} />
