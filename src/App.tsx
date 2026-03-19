@@ -9,6 +9,7 @@ import SearchVisualizer from "./pages/SearchVisualizer.tsx";
 import TicTacToe from "./pages/TicTacToe.tsx";
 import TSPVisualizer from "./pages/TSPVisualizer.tsx";
 import MapColoring from "./pages/MapColoring.tsx";
+import MinimaxTree from "./pages/MinimaxTree.tsx";
 
 const queryClient = new QueryClient();
 
