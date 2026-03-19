@@ -22,6 +22,7 @@ const sections = [
     description: "AI game playing with decision tree visualization",
     algorithms: [
       { name: "Minimax", slug: "minimax", complexity: "O(b^m)" },
+      { name: "Minimax Tree", slug: "minimax-tree", complexity: "O(b^d)" },
     ],
     path: "/game",
   },

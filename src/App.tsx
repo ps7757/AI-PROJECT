@@ -9,6 +9,7 @@ import SearchVisualizer from "./pages/SearchVisualizer.tsx";
 import TicTacToe from "./pages/TicTacToe.tsx";
 import TSPVisualizer from "./pages/TSPVisualizer.tsx";
 import MapColoring from "./pages/MapColoring.tsx";
+import MinimaxTree from "./pages/MinimaxTree.tsx";
 
 const queryClient = new QueryClient();
 
@@ -22,6 +23,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/search/:algo" element={<SearchVisualizer />} />
           <Route path="/game/minimax" element={<TicTacToe />} />
+          <Route path="/game/minimax-tree" element={<MinimaxTree />} />
           <Route path="/tsp/tsp" element={<TSPVisualizer />} />
           <Route path="/csp/map-coloring" element={<MapColoring />} />
           <Route path="*" element={<NotFound />} />
