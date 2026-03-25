@@ -1,6 +1,15 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Play, Pause, RotateCcw, TreePine } from "lucide-react";
+import { ExplanationStep } from "@/types/explanation";
+import { StepExplanationPanel } from "@/components/StepExplanationPanel";
+import { StepHistoryPanel } from "@/components/StepHistoryPanel";
+import { SkipBack, SkipForward } from "lucide-react";
+
+interface MinimaxSnapshot {
+  tree: TreeNode;
+  explanation: ExplanationStep | null;
+}
 
 /* ─── Types ─── */
 interface TreeNode {
@@ -72,6 +81,10 @@ function layoutTree(node: TreeNode, totalDepth: number, svgW: number, svgH: numb
 }
 
 /* ─── Flatten for rendering ─── */
+function flatCloneTree(node: TreeNode): TreeNode {
+  return { ...node, children: node.children.map(flatCloneTree) };
+}
+
 function flattenTree(node: TreeNode): TreeNode[] {
   const result: TreeNode[] = [node];
   node.children.forEach(c => result.push(...flattenTree(c)));
@@ -101,6 +114,21 @@ const MinimaxTree = () => {
   const [speed, setSpeed] = useState(50);
   const [stepCount, setStepCount] = useState(0);
   const [alphaBeta, setAlphaBeta] = useState(false);
+  const [learningMode, setLearningMode] = useState(true);
+  const [speechEnabled, setSpeechEnabled] = useState(false);
+  const [currentExplanation, setCurrentExplanation] = useState<ExplanationStep | null>(null);
+
+  const [algoSnapshots, setAlgoSnapshots] = useState<MinimaxSnapshot[]>([]);
+  const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+
+  const history = useMemo(() => {
+    if (currentStepIndex < 0 || !algoSnapshots.length) return [];
+    return algoSnapshots
+      .slice(0, currentStepIndex + 1)
+      .map((s, i) => s.explanation ? { ...s.explanation, step: i + 1 } : null)
+      .filter(Boolean) as ExplanationStep[];
+  }, [currentStepIndex, algoSnapshots]);
+
   const cancelRef = useRef(false);
   const pauseRef = useRef(false);
   const speedRef = useRef(speed);
@@ -113,6 +141,8 @@ const MinimaxTree = () => {
     setIsRunning(false);
     setIsPaused(false);
     setStepCount(0);
+    setAlgoSnapshots([]);
+    setCurrentStepIndex(-1);
     nodeIdCounter = 0;
     const root = buildTree(depth, branch, 0, true);
     layoutTree(root, depth, SVG_W, SVG_H);
@@ -122,24 +152,29 @@ const MinimaxTree = () => {
   // Generate on mount
   useEffect(() => { generateTree(); }, []);
 
-  const delay = useCallback(async () => {
-    const ms = Math.max(100, 800 - speedRef.current * 7);
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      if (cancelRef.current) throw new Error("cancel");
-      while (pauseRef.current && !cancelRef.current) {
-        await new Promise(r => setTimeout(r, 50));
+  useEffect(() => {
+    if (!isRunning || isPaused || currentStepIndex < 0 || currentStepIndex >= algoSnapshots.length) {
+      if (isRunning && currentStepIndex >= algoSnapshots.length) {
+        setIsRunning(false);
       }
-      if (cancelRef.current) throw new Error("cancel");
-      await new Promise(r => setTimeout(r, 30));
+      return;
     }
-  }, []);
+    const timer = setTimeout(() => {
+      setCurrentStepIndex(p => p + 1);
+    }, Math.max(50, 800 - speed * 7));
+    return () => clearTimeout(timer);
+  }, [isRunning, isPaused, currentStepIndex, algoSnapshots, speed]);
 
-  const forceUpdate = useCallback((root: TreeNode) => {
-    setTree({ ...root });
-  }, []);
+  useEffect(() => {
+    if (currentStepIndex >= 0 && algoSnapshots[currentStepIndex]) {
+      const snap = algoSnapshots[currentStepIndex];
+      setTree(snap.tree);
+      setCurrentExplanation(snap.explanation);
+      setStepCount(currentStepIndex + 1);
+    }
+  }, [currentStepIndex, algoSnapshots]);
 
-  const runMinimax = useCallback(async () => {
+  const runMinimax = useCallback(() => {
     if (!tree) return;
     cancelRef.current = false;
     setIsRunning(true);
@@ -153,26 +188,39 @@ const MinimaxTree = () => {
       n.children.forEach(resetStates);
     }
     resetStates(tree);
-    forceUpdate(tree);
 
-    let steps = 0;
+    const snapshots: MinimaxSnapshot[] = [];
     const root = tree;
+    let expCounter = 1;
 
-    async function minimax(node: TreeNode, alpha: number, beta: number): Promise<number> {
+    function addSnapshot(exp: ExplanationStep | null) {
+      snapshots.push({ tree: flatCloneTree(root), explanation: exp });
+    }
+
+    function minimax(node: TreeNode, alpha: number, beta: number): number {
       if (cancelRef.current) throw new Error("cancel");
 
       node.state = "active";
       node.alpha = alpha;
       node.beta = beta;
-      steps++;
-      setStepCount(steps);
-      forceUpdate(root);
-      await delay();
+      
+      addSnapshot({
+        step: expCounter++,
+        action: `Evaluating ${node.isMax ? "MAX" : "MIN"} node`,
+        reason: node.isMax 
+          ? "Maximizer aims for the highest possible score."
+          : "Minimizer aims for the lowest possible score.",
+        state: { alpha: alpha === -Infinity ? "-∞" : alpha, beta: beta === Infinity ? "+∞" : beta, currentDepth: node.depth }
+      });
 
       if (node.children.length === 0) {
         node.state = "evaluated";
-        forceUpdate(root);
-        await delay();
+        addSnapshot({
+          step: expCounter++,
+          action: "Reached leaf node",
+          reason: `Static evaluation score is ${node.value}.`,
+          state: { nodeValue: node.value! }
+        });
         return node.value!;
       }
 
@@ -181,16 +229,21 @@ const MinimaxTree = () => {
         val = -Infinity;
         for (const child of node.children) {
           if (child.state === "pruned") continue;
-          const childVal = await minimax(child, alpha, beta);
+          const childVal = minimax(child, alpha, beta);
           val = Math.max(val, childVal);
           alpha = Math.max(alpha, val);
           if (alphaBeta && beta <= alpha) {
-            // Prune remaining children
             const idx = node.children.indexOf(child);
+            addSnapshot({
+              step: expCounter++,
+              action: "Alpha-Beta Pruning (MAX)",
+              reason: `Beta (${beta}) ≤ Alpha (${alpha}). The MIN player above will never choose this branch, pruning remaining children.`,
+              state: { alpha, beta, prunedCount: node.children.length - 1 - idx }
+            });
+            // Prune remaining children
             for (let i = idx + 1; i < node.children.length; i++) {
               markPruned(node.children[i]);
             }
-            forceUpdate(root);
             break;
           }
         }
@@ -198,15 +251,20 @@ const MinimaxTree = () => {
         val = Infinity;
         for (const child of node.children) {
           if (child.state === "pruned") continue;
-          const childVal = await minimax(child, alpha, beta);
+          const childVal = minimax(child, alpha, beta);
           val = Math.min(val, childVal);
           beta = Math.min(beta, val);
           if (alphaBeta && beta <= alpha) {
             const idx = node.children.indexOf(child);
+            addSnapshot({
+              step: expCounter++,
+              action: "Alpha-Beta Pruning (MIN)",
+              reason: `Beta (${beta}) ≤ Alpha (${alpha}). The MAX player above will never choose this branch, pruning remaining children.`,
+              state: { alpha, beta, prunedCount: node.children.length - 1 - idx }
+            });
             for (let i = idx + 1; i < node.children.length; i++) {
               markPruned(node.children[i]);
             }
-            forceUpdate(root);
             break;
           }
         }
@@ -214,8 +272,12 @@ const MinimaxTree = () => {
 
       node.value = val;
       node.state = "evaluated";
-      forceUpdate(root);
-      await delay();
+      addSnapshot({
+        step: expCounter++,
+        action: `Evaluated ${node.isMax ? "MAX" : "MIN"} node`,
+        reason: node.isMax ? `Maximizer chose best score: ${val}` : `Minimizer chose worst score: ${val}`,
+        state: { finalValue: val }
+      });
       return val;
     }
 
@@ -225,7 +287,7 @@ const MinimaxTree = () => {
     }
 
     try {
-      await minimax(root, -Infinity, Infinity);
+      minimax(root, -Infinity, Infinity);
 
       // Trace optimal path
       function traceOptimal(n: TreeNode) {
@@ -236,20 +298,28 @@ const MinimaxTree = () => {
         if (best) traceOptimal(best);
       }
       traceOptimal(root);
-      forceUpdate(root);
+      addSnapshot({
+        step: expCounter++,
+        action: "Algorithm Complete",
+        reason: "The optimal path has been found and highlighted in green.",
+        state: null
+      });
+
+      setAlgoSnapshots(snapshots);
+      setCurrentStepIndex(0);
     } catch {
       // cancelled
     }
-
-    setIsRunning(false);
-    setIsPaused(false);
-  }, [tree, alphaBeta, delay, forceUpdate]);
+  }, [tree, alphaBeta]);
 
   const reset = useCallback(() => {
     cancelRef.current = true;
     setIsRunning(false);
     setIsPaused(false);
     setStepCount(0);
+    setCurrentExplanation(null);
+    setAlgoSnapshots([]);
+    setCurrentStepIndex(-1);
     if (tree) {
       function resetStates(n: TreeNode) {
         n.state = "idle";
@@ -354,25 +424,61 @@ const MinimaxTree = () => {
             <span className="text-sm">Alpha-Beta Pruning</span>
           </label>
 
+          {/* Learning Mode */}
+          <div className="flex items-center justify-between border border-border p-3 rounded-md bg-secondary/30 mt-1">
+            <div>
+              <p className="section-label mb-1">Learning Mode</p>
+              <p className="text-[10px] text-muted-foreground mr-2">Show step-by-step reasoning</p>
+            </div>
+            <label className="flex items-center cursor-pointer select-none">
+              <div
+                onClick={() => setLearningMode(!learningMode)}
+                className={`w-10 h-6 rounded-full relative transition-colors ${learningMode ? "bg-primary" : "bg-primary/20"}`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-foreground shadow transition-transform ${learningMode ? "translate-x-4" : ""}`} />
+              </div>
+            </label>
+          </div>
+
           {/* Controls */}
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 mt-2">
             <button onClick={generateTree} disabled={isRunning}
               className="control-btn-secondary flex items-center justify-center gap-2 disabled:opacity-50">
               <TreePine className="w-4 h-4" /> Generate Tree
             </button>
-            {!isRunning ? (
+            {!isRunning && algoSnapshots.length === 0 ? (
               <button onClick={runMinimax} disabled={!tree}
                 className="control-btn-primary flex items-center justify-center gap-2 disabled:opacity-50">
                 <Play className="w-4 h-4" /> Start
               </button>
             ) : (
-              <button onClick={() => setIsPaused(p => !p)}
-                className="control-btn-primary flex items-center justify-center gap-2">
-                <Pause className="w-4 h-4" /> {isPaused ? "Resume" : "Pause"}
-              </button>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => setIsPaused(p => !p)}
+                  className="control-btn-primary flex items-center justify-center gap-2"
+                >
+                  {isPaused || (!isRunning && currentStepIndex < algoSnapshots.length - 1) ? <><Play className="w-4 h-4" /> Resume</> : <><Pause className="w-4 h-4" /> Pause</>}
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.max(0, p - 1)); }}
+                    disabled={currentStepIndex <= 0}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipBack className="w-4 h-4" /> Step Back
+                  </button>
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.min(algoSnapshots.length - 1, p + 1)); }}
+                    disabled={currentStepIndex >= algoSnapshots.length - 1}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipForward className="w-4 h-4" /> Step Forward
+                  </button>
+                </div>
+              </div>
             )}
             <button onClick={reset}
-              className="control-btn-secondary flex items-center justify-center gap-2">
+              className="control-btn-secondary flex items-center justify-center gap-2 mt-1">
               <RotateCcw className="w-4 h-4" /> Reset
             </button>
           </div>
@@ -415,8 +521,8 @@ const MinimaxTree = () => {
         </aside>
 
         {/* Visualization */}
-        <section className="relative flex items-center justify-center p-4 overflow-auto">
-          <svg width={SVG_W} height={SVG_H} className="border border-border rounded-md bg-card/30">
+        <section className="relative flex flex-col items-center pt-8 p-4 overflow-auto">
+          <svg width={SVG_W} height={SVG_H} className="border border-border rounded-md bg-card/30 flex-shrink-0">
             {/* Edges */}
             {edges.map(({ from, to }) => (
               <line
@@ -457,6 +563,16 @@ const MinimaxTree = () => {
               </g>
             ))}
           </svg>
+          
+          <div className="w-full max-w-[900px] mt-8 flex-shrink-0 flex flex-col gap-4">
+            <StepExplanationPanel 
+              explanation={currentExplanation}
+              learningMode={learningMode}
+              speechEnabled={speechEnabled}
+              onToggleSpeech={() => setSpeechEnabled(!speechEnabled)}
+            />
+            {learningMode && <StepHistoryPanel history={history} />}
+          </div>
         </section>
       </div>
     </div>

@@ -1,6 +1,18 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Play, RotateCcw, Shuffle } from "lucide-react";
+import { ArrowLeft, Play, Pause, RotateCcw, Shuffle, SkipBack, SkipForward } from "lucide-react";
+import { ExplanationStep } from "@/types/explanation";
+import { StepExplanationPanel } from "@/components/StepExplanationPanel";
+import { StepHistoryPanel } from "@/components/StepHistoryPanel";
+import { useMemo } from "react";
+
+interface TSPSnapshot {
+  currentRoute: number[];
+  bestRoute: number[];
+  bestDist: number;
+  iteration: number;
+  explanation: ExplanationStep | null;
+}
 
 interface City { x: number; y: number; id: number; }
 
@@ -32,9 +44,23 @@ const TSPVisualizer = () => {
   const [iteration, setIteration] = useState(0);
   const [speed, setSpeed] = useState(50);
   const [cityCount, setCityCount] = useState(10);
+  const [learningMode, setLearningMode] = useState(true);
+  const [speechEnabled, setSpeechEnabled] = useState(false);
+  const [currentExplanation, setCurrentExplanation] = useState<ExplanationStep | null>(null);
+  
+  const [isPaused, setIsPaused] = useState(false);
+  const [algoSnapshots, setAlgoSnapshots] = useState<TSPSnapshot[]>([]);
+  const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+
+  const history = useMemo(() => {
+    if (currentStepIndex < 0 || !algoSnapshots.length) return [];
+    return algoSnapshots
+      .slice(0, currentStepIndex + 1)
+      .map((s, i) => s.explanation ? { ...s.explanation, step: i + 1 } : null)
+      .filter(Boolean) as ExplanationStep[];
+  }, [currentStepIndex, algoSnapshots]);
+
   const cancelRef = useRef(false);
-  const speedRef = useRef(speed);
-  useEffect(() => { speedRef.current = speed; }, [speed]);
 
   const reset = useCallback(() => {
     cancelRef.current = true;
@@ -44,14 +70,45 @@ const TSPVisualizer = () => {
     setBestRoute([]);
     setBestDist(Infinity);
     setIsRunning(false);
+    setIsPaused(false);
     setIteration(0);
+    setCurrentExplanation(null);
+    setAlgoSnapshots([]);
+    setCurrentStepIndex(-1);
   }, [cityCount]);
 
+  useEffect(() => {
+    if (!isRunning || isPaused || currentStepIndex < 0 || currentStepIndex >= algoSnapshots.length) {
+      if (isRunning && currentStepIndex >= algoSnapshots.length) {
+        setIsRunning(false);
+      }
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCurrentStepIndex(p => p + 1);
+    }, Math.max(10, 400 - speed * 3));
+    return () => clearTimeout(timer);
+  }, [isRunning, isPaused, currentStepIndex, algoSnapshots, speed]);
+
+  useEffect(() => {
+    if (currentStepIndex >= 0 && algoSnapshots[currentStepIndex]) {
+      const snap = algoSnapshots[currentStepIndex];
+      setCurrentRoute(snap.currentRoute);
+      setBestRoute(snap.bestRoute);
+      setBestDist(snap.bestDist);
+      setIteration(snap.iteration);
+      setCurrentExplanation(snap.explanation);
+    }
+  }, [currentStepIndex, algoSnapshots]);
+
   // Nearest neighbor + 2-opt improvement
-  const run = useCallback(async () => {
-    cancelRef.current = false;
+  const run = useCallback(() => {
     setIsRunning(true);
+    setIsPaused(false);
     setIteration(0);
+    setCurrentExplanation(null);
+    let expStep = 1;
+    const snapshots: TSPSnapshot[] = [];
 
     // Start with nearest neighbor
     const visited = new Set<number>();
@@ -68,42 +125,84 @@ const TSPVisualizer = () => {
       }
       route.push(nearest);
       visited.add(nearest);
-      setCurrentRoute([...route]);
-      await new Promise(r => setTimeout(r, Math.max(10, 200 - speedRef.current * 2)));
-      if (cancelRef.current) return;
+      snapshots.push({
+        currentRoute: [...route],
+        bestRoute: [],
+        bestDist: Infinity,
+        iteration: 0,
+        explanation: {
+          step: expStep++,
+          action: `Nearest Neighbor: Visited City ${nearest}`,
+          reason: `City ${nearest} is the closest unvisited city to City ${last.id} with a distance of ${Math.round(nearestDist)} units.`,
+          state: { currentCity: last.id, nearestCity: nearest, distance: Math.round(nearestDist) }
+        }
+      });
     }
 
     let best = [...route];
     let bestD = totalDist(cities, best);
-    setBestRoute([...best]);
-    setBestDist(Math.round(bestD));
-    setCurrentRoute([...best]);
+    
+    snapshots.push({
+      currentRoute: [...best],
+      bestRoute: [...best],
+      bestDist: Math.round(bestD),
+      iteration: 0,
+      explanation: {
+        step: expStep++,
+        action: "Initial Route Complete",
+        reason: "Nearest Neighbor algorithm finished an initial complete tour. Next, the 2-opt algorithm will try swapping edges to uncross lines and optimize.",
+        state: { initialDistance: Math.round(bestD) }
+      }
+    });
 
     // 2-opt improvement
     let improved = true;
     let iter = 0;
-    while (improved && !cancelRef.current) {
+    while (improved) {
       improved = false;
-      for (let i = 1; i < best.length - 1 && !cancelRef.current; i++) {
-        for (let j = i + 1; j < best.length && !cancelRef.current; j++) {
+      for (let i = 1; i < best.length - 1; i++) {
+        for (let j = i + 1; j < best.length; j++) {
           const newRoute = [...best.slice(0, i), ...best.slice(i, j + 1).reverse(), ...best.slice(j + 1)];
           const newD = totalDist(cities, newRoute);
           if (newD < bestD) {
             best = newRoute;
             bestD = newD;
             improved = true;
-            setBestRoute([...best]);
-            setBestDist(Math.round(bestD));
-            setCurrentRoute([...best]);
             iter++;
-            setIteration(iter);
-            await new Promise(r => setTimeout(r, Math.max(5, 100 - speedRef.current)));
+            const prevD = bestD;
+            
+            snapshots.push({
+              currentRoute: [...best],
+              bestRoute: [...best],
+              bestDist: Math.round(bestD),
+              iteration: iter,
+              explanation: {
+                step: expStep++,
+                action: `2-opt Swap Improved Route`,
+                reason: `Reversing the segment between City ${best[i]} and City ${best[j]} removed intersecting lines and reduced the total distance to ${Math.round(newD)}.`,
+                state: { iteration: iter, newDistance: Math.round(newD), improvement: Math.round(prevD - newD) }
+              }
+            });
           }
         }
       }
     }
 
-    setIsRunning(false);
+    snapshots.push({
+      currentRoute: [...best],
+      bestRoute: [...best],
+      bestDist: Math.round(bestD),
+      iteration: iter,
+      explanation: {
+        step: expStep++,
+        action: "Algorithm Complete",
+        reason: "No further 2-opt improvements could be found.",
+        state: null
+      }
+    });
+
+    setAlgoSnapshots(snapshots);
+    setCurrentStepIndex(0);
   }, [cities]);
 
   const drawRoute = (route: number[], color: string, opacity: number = 1) => {
@@ -161,11 +260,54 @@ const TSPVisualizer = () => {
             <input type="range" min={1} max={100} value={speed} onChange={e => setSpeed(Number(e.target.value))} className="w-full mt-2 accent-primary" />
           </div>
 
-          <div className="flex flex-col gap-2">
-            <button onClick={run} disabled={isRunning} className="control-btn-primary flex items-center justify-center gap-2 disabled:opacity-50">
-              <Play className="w-4 h-4" /> Run
-            </button>
-            <button onClick={reset} className="control-btn-secondary flex items-center justify-center gap-2">
+          {/* Learning Mode */}
+          <div className="flex items-center justify-between border border-border p-3 rounded-md bg-secondary/30 mt-1">
+            <div>
+              <p className="section-label mb-1">Learning Mode</p>
+              <p className="text-[10px] text-muted-foreground mr-2">Show step-by-step reasoning</p>
+            </div>
+            <label className="flex items-center cursor-pointer select-none">
+              <div
+                onClick={() => !isRunning && setLearningMode(!learningMode)}
+                className={`w-10 h-6 rounded-full relative transition-colors ${learningMode ? "bg-primary" : "bg-primary/20"} ${isRunning ? "opacity-50" : ""}`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-foreground shadow transition-transform ${learningMode ? "translate-x-4" : ""}`} />
+              </div>
+            </label>
+          </div>
+
+          <div className="flex flex-col gap-2 mt-2">
+            {!isRunning && algoSnapshots.length === 0 ? (
+              <button onClick={run} className="control-btn-primary flex items-center justify-center gap-2">
+                <Play className="w-4 h-4" /> Run Algorithm
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => setIsPaused(p => !p)}
+                  className="control-btn-primary flex items-center justify-center gap-2"
+                >
+                  {isPaused || (!isRunning && currentStepIndex < algoSnapshots.length - 1) ? <><Play className="w-4 h-4" /> Resume</> : <><Pause className="w-4 h-4" /> Pause</>}
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.max(0, p - 1)); }}
+                    disabled={currentStepIndex <= 0}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipBack className="w-4 h-4" /> Step Back
+                  </button>
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.min(algoSnapshots.length - 1, p + 1)); }}
+                    disabled={currentStepIndex >= algoSnapshots.length - 1}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipForward className="w-4 h-4" /> Step Forward
+                  </button>
+                </div>
+              </div>
+            )}
+            <button onClick={reset} className="control-btn-secondary flex items-center justify-center gap-2 mt-1">
               <Shuffle className="w-4 h-4" /> New Cities
             </button>
           </div>
@@ -189,8 +331,8 @@ const TSPVisualizer = () => {
           </div>
         </aside>
 
-        <section className="relative flex items-center justify-center p-8">
-          <svg width="600" height="500" className="border border-border rounded-md bg-card/30">
+        <section className="relative flex flex-col items-center p-8 overflow-auto pt-8">
+          <svg width="600" height="500" className="flex-shrink-0 border border-border rounded-md bg-card/30">
             {drawRoute(bestRoute, "hsl(var(--node-path))", 0.3)}
             {drawRoute(currentRoute, "hsl(var(--primary))")}
             {cities.map(city => (
@@ -203,6 +345,16 @@ const TSPVisualizer = () => {
               </g>
             ))}
           </svg>
+          
+          <div className="w-full max-w-[600px] mt-8 flex-shrink-0 flex flex-col gap-4">
+            <StepExplanationPanel 
+              explanation={currentExplanation}
+              learningMode={learningMode}
+              speechEnabled={speechEnabled}
+              onToggleSpeech={() => setSpeechEnabled(!speechEnabled)}
+            />
+            {learningMode && <StepHistoryPanel history={history} />}
+          </div>
         </section>
       </div>
     </div>

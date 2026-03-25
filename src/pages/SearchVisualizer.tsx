@@ -1,8 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Play, Pause, RotateCcw, SkipForward } from "lucide-react";
+import { ArrowLeft, Play, Pause, RotateCcw, SkipForward, SkipBack } from "lucide-react";
 import { CellType, AlgoStep, ALGORITHM_INFO, ALGORITHM_FN } from "@/lib/searchAlgorithms";
+import { ExplanationStep } from "@/types/explanation";
+import { StepExplanationPanel } from "@/components/StepExplanationPanel";
+import { StepHistoryPanel } from "@/components/StepHistoryPanel";
+import { useMemo } from "react";
 
 const ROWS = 20;
 const COLS = 20;
@@ -42,6 +46,25 @@ const SearchVisualizer = () => {
   const [isDrawing, setIsDrawing] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
 
+  const [learningMode, setLearningMode] = useState(true);
+  const [speechEnabled, setSpeechEnabled] = useState(false);
+  const [currentExplanation, setCurrentExplanation] = useState<ExplanationStep | null>(null);
+
+  const [algoSteps, setAlgoSteps] = useState<AlgoStep[]>([]);
+  const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+  const baseGridRef = useRef<CellType[][]>([]);
+
+  const history = useMemo(() => {
+    if (currentStepIndex < 0 || !algoSteps.length) return [];
+    const arr: ExplanationStep[] = [];
+    for (let i = 0; i <= currentStepIndex; i++) {
+      if (algoSteps[i]?.explanation) {
+        arr.push({ step: i + 1, ...algoSteps[i].explanation! });
+      }
+    }
+    return arr;
+  }, [currentStepIndex, algoSteps]);
+
   const isPausedRef = useRef(isPaused);
   const speedRef = useRef(speed);
   const cancelRef = useRef(false);
@@ -58,6 +81,9 @@ const SearchVisualizer = () => {
     setNodesExplored(0);
     setPathLength(0);
     setIsComplete(false);
+    setCurrentExplanation(null);
+    setAlgoSteps([]);
+    setCurrentStepIndex(-1);
   }, []);
 
   const clearVisualization = useCallback(() => {
@@ -66,6 +92,9 @@ const SearchVisualizer = () => {
     setNodesExplored(0);
     setPathLength(0);
     setIsComplete(false);
+    setCurrentExplanation(null);
+    setAlgoSteps([]);
+    setCurrentStepIndex(-1);
   }, []);
 
   const handleCellInteraction = useCallback((r: number, c: number) => {
@@ -87,9 +116,8 @@ const SearchVisualizer = () => {
     });
   }, [isRunning, drawMode]);
 
-  const runAlgorithm = useCallback(async () => {
+  const runAlgorithm = useCallback(() => {
     clearVisualization();
-    cancelRef.current = false;
     setIsRunning(true);
     setIsPaused(false);
 
@@ -105,35 +133,60 @@ const SearchVisualizer = () => {
     }
 
     const result = runFn(baseGrid, start, goal);
-    const steps = result.steps;
+    baseGridRef.current = baseGrid;
+    setAlgoSteps(result.steps);
+    setCurrentStepIndex(0);
+    setCurrentExplanation(null);
+  }, [grid, runFn, clearVisualization]);
 
-    for (let i = 0; i < steps.length; i++) {
-      if (cancelRef.current) return;
-      while (isPausedRef.current) {
-        await new Promise(res => setTimeout(res, 50));
-        if (cancelRef.current) return;
+  // Playback timer
+  useEffect(() => {
+    if (!isRunning || isPaused || currentStepIndex < 0 || currentStepIndex >= algoSteps.length) {
+      if (isRunning && currentStepIndex >= algoSteps.length) {
+        setIsRunning(false);
+        setIsComplete(true);
       }
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCurrentStepIndex(p => p + 1);
+    }, Math.max(5, 200 - speed * 2));
+    return () => clearTimeout(timer);
+  }, [isRunning, isPaused, currentStepIndex, algoSteps, speed]);
 
-      const step = steps[i];
-      setGrid(prev => {
-        const ng = prev.map(row => [...row]);
-        if (ng[step.row][step.col] !== "start" && ng[step.row][step.col] !== "goal") {
-          ng[step.row][step.col] = step.type;
-        }
-        return ng;
-      });
-      setStepCount(i + 1);
-      if (step.type === "visited") setNodesExplored(prev => prev + 1);
-      if (step.type === "path") setPathLength(prev => prev + 1);
+  // Derived Grid updates
+  useEffect(() => {
+    if (currentStepIndex < 0 || !baseGridRef.current.length || !algoSteps.length) return;
 
-      await new Promise(res => setTimeout(res, Math.max(5, 200 - speedRef.current * 2)));
+    const newGrid = baseGridRef.current.map(row => [...row]);
+    let newNodes = 0;
+    let newPath = 0;
+
+    for (let i = 0; i <= currentStepIndex; i++) {
+      const step = algoSteps[i];
+      if (!step) continue;
+      if (newGrid[step.row][step.col] !== "start" && newGrid[step.row][step.col] !== "goal") {
+        newGrid[step.row][step.col] = step.type;
+      }
+      if (step.type === "visited") newNodes++;
+      if (step.type === "path") newPath++;
     }
 
-    setIsRunning(false);
-    setIsComplete(true);
-    setPathLength(result.pathLength);
-    setNodesExplored(result.nodesExplored);
-  }, [grid, runFn, clearVisualization]);
+    setGrid(newGrid);
+    setStepCount(currentStepIndex + 1);
+    setNodesExplored(newNodes);
+    setPathLength(newPath);
+
+    const stepInfo = algoSteps[currentStepIndex];
+    if (stepInfo?.explanation) {
+      setCurrentExplanation({
+        step: currentStepIndex + 1,
+        action: stepInfo.explanation.action,
+        reason: stepInfo.explanation.reason,
+        state: stepInfo.explanation.state
+      });
+    }
+  }, [currentStepIndex, algoSteps]);
 
   return (
     <div className="page-container">
@@ -214,21 +267,57 @@ const SearchVisualizer = () => {
             </div>
           </div>
 
+          {/* Learning Mode */}
+          <div className="flex items-center justify-between border border-border p-3 rounded-md bg-secondary/30 mt-1">
+            <div>
+              <p className="section-label mb-1">Learning Mode</p>
+              <p className="text-[10px] text-muted-foreground mr-2">Show step-by-step reasoning</p>
+            </div>
+            <label className="flex items-center cursor-pointer select-none">
+              <div
+                onClick={() => setLearningMode(!learningMode)}
+                className={`w-10 h-6 rounded-full relative transition-colors ${learningMode ? "bg-primary" : "bg-primary/20"}`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-foreground shadow transition-transform ${learningMode ? "translate-x-4" : ""}`} />
+              </div>
+            </label>
+          </div>
+
           {/* Controls */}
-          <div className="flex flex-col gap-2">
-            {!isRunning ? (
+          <div className="flex flex-col gap-2 mt-2">
+            {!isRunning && algoSteps.length === 0 ? (
               <button onClick={runAlgorithm} className="control-btn-primary flex items-center justify-center gap-2">
                 <Play className="w-4 h-4" /> Run Algorithm
               </button>
             ) : (
-              <button
-                onClick={() => setIsPaused(p => !p)}
-                className="control-btn-primary flex items-center justify-center gap-2"
-              >
-                {isPaused ? <><Play className="w-4 h-4" /> Resume</> : <><Pause className="w-4 h-4" /> Pause</>}
-              </button>
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setIsPaused(p => !p)}
+                    className="control-btn-primary flex-1 flex items-center justify-center gap-2"
+                  >
+                    {isPaused || (!isRunning && currentStepIndex < algoSteps.length - 1) ? <><Play className="w-4 h-4" /> Resume</> : <><Pause className="w-4 h-4" /> Pause</>}
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.max(0, p - 1)); }}
+                    disabled={currentStepIndex <= 0}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipBack className="w-4 h-4" /> Step Back
+                  </button>
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.min(algoSteps.length - 1, p + 1)); }}
+                    disabled={currentStepIndex >= algoSteps.length - 1}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipForward className="w-4 h-4" /> Step Forward
+                  </button>
+                </div>
+              </div>
             )}
-            <button onClick={resetGrid} className="control-btn-secondary flex items-center justify-center gap-2">
+            <button onClick={resetGrid} className="control-btn-secondary flex items-center justify-center gap-2 mt-1">
               <RotateCcw className="w-4 h-4" /> Reset Grid
             </button>
           </div>
@@ -261,9 +350,9 @@ const SearchVisualizer = () => {
         </aside>
 
         {/* Canvas */}
-        <section className="relative flex items-center justify-center p-4 lg:p-8 overflow-auto">
+        <section className="relative flex flex-col items-center pt-8 p-4 lg:p-8 overflow-auto">
           <div
-            className="inline-grid border border-border rounded-md overflow-hidden"
+            className="inline-grid border border-border rounded-md overflow-hidden flex-shrink-0"
             style={{
               gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
               gap: "1px",
@@ -284,6 +373,16 @@ const SearchVisualizer = () => {
                 />
               ))
             )}
+          </div>
+          
+          <div className="w-full max-w-[600px] mt-8 flex-shrink-0 flex flex-col gap-4">
+            <StepExplanationPanel 
+              explanation={currentExplanation}
+              learningMode={learningMode}
+              speechEnabled={speechEnabled}
+              onToggleSpeech={() => setSpeechEnabled(!speechEnabled)}
+            />
+            {learningMode && <StepHistoryPanel history={history} />}
           </div>
         </section>
       </div>

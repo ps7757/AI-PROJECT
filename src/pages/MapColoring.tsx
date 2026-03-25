@@ -1,7 +1,17 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Play, RotateCcw } from "lucide-react";
+import { ArrowLeft, Play, Pause, RotateCcw, Shuffle, SkipBack, SkipForward } from "lucide-react";
 import { motion } from "framer-motion";
+import { ExplanationStep } from "@/types/explanation";
+import { StepExplanationPanel } from "@/components/StepExplanationPanel";
+import { StepHistoryPanel } from "@/components/StepHistoryPanel";
+import { useMemo } from "react";
+
+interface MapSnapshot {
+  regions: Region[];
+  backtracks: number;
+  explanation: ExplanationStep | null;
+}
 
 interface Region {
   id: number;
@@ -21,6 +31,31 @@ const COLORS = [
 ];
 const COLOR_NAMES = ["Cyan", "Red", "Amber", "Green"];
 
+function generateRandomGraph(numNodes: number): Region[] {
+  const nodes: Region[] = [];
+  for (let i = 0; i < numNodes; i++) {
+    nodes.push({
+      id: i,
+      name: String.fromCharCode(65 + i),
+      cx: 50 + Math.random() * 460,
+      cy: 50 + Math.random() * 380,
+      path: "",
+      neighbors: [],
+      color: -1,
+    });
+  }
+  for (let i = 0; i < numNodes; i++) {
+    const distances = nodes.map(n => ({ id: n.id, d: Math.hypot(n.cx - nodes[i].cx, n.cy - nodes[i].cy) }));
+    distances.sort((a,b) => a.d - b.d);
+    const closest = distances.slice(1, 4);
+    for (const c of closest) {
+      if (!nodes[i].neighbors.includes(c.id)) nodes[i].neighbors.push(c.id);
+      if (!nodes[c.id].neighbors.includes(i)) nodes[c.id].neighbors.push(i);
+    }
+  }
+  return nodes;
+}
+
 // Simple map with 7 regions
 const createRegions = (): Region[] => [
   { id: 0, name: "A", cx: 150, cy: 100, path: "M80,40 L220,40 L220,160 L80,160 Z", neighbors: [1, 2, 3], color: -1 },
@@ -39,63 +74,162 @@ const MapColoring = () => {
   const [backtracks, setBacktracks] = useState(0);
   const [speed, setSpeed] = useState(50);
   const [isComplete, setIsComplete] = useState(false);
+  const [learningMode, setLearningMode] = useState(true);
+  const [speechEnabled, setSpeechEnabled] = useState(false);
+  const [currentExplanation, setCurrentExplanation] = useState<ExplanationStep | null>(null);
+  
+  const [isPaused, setIsPaused] = useState(false);
+  const [algoSnapshots, setAlgoSnapshots] = useState<MapSnapshot[]>([]);
+  const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+
+  const history = useMemo(() => {
+    if (currentStepIndex < 0 || !algoSnapshots.length) return [];
+    return algoSnapshots
+      .slice(0, currentStepIndex + 1)
+      .map((s, i) => s.explanation ? { ...s.explanation, step: i + 1 } : null)
+      .filter(Boolean) as ExplanationStep[];
+  }, [currentStepIndex, algoSnapshots]);
+
   const cancelRef = useRef(false);
-  const speedRef = useRef(speed);
-  useEffect(() => { speedRef.current = speed; }, [speed]);
 
   const reset = useCallback(() => {
     cancelRef.current = true;
     setRegions(createRegions());
     setIsRunning(false);
+    setIsPaused(false);
     setStepCount(0);
     setBacktracks(0);
     setIsComplete(false);
+    setCurrentExplanation(null);
+    setAlgoSnapshots([]);
+    setCurrentStepIndex(-1);
   }, []);
 
-  const run = useCallback(async () => {
-    cancelRef.current = false;
-    setIsRunning(true);
+  const generateRandom = useCallback(() => {
+    cancelRef.current = true;
+    setRegions(generateRandomGraph(7));
+    setIsRunning(false);
+    setIsPaused(false);
     setStepCount(0);
     setBacktracks(0);
     setIsComplete(false);
+    setCurrentExplanation(null);
+    setAlgoSnapshots([]);
+    setCurrentStepIndex(-1);
+  }, []);
 
-    const regs = createRegions();
-    setRegions([...regs]);
-    let steps = 0;
+  const handleRegionClick = useCallback((index: number) => {
+    if (isRunning || algoSnapshots.length > 0) return;
+    setRegions(prev => {
+      const next = [...prev];
+      const targetIndex = next.findIndex(r => r.id === index);
+      if (targetIndex === -1) return prev;
+      let col = next[targetIndex].color + 1;
+      if (col >= 4) col = -1;
+      next[targetIndex] = { ...next[targetIndex], color: col };
+      return next;
+    });
+  }, [isRunning, algoSnapshots.length]);
+
+  useEffect(() => {
+    if (!isRunning || isPaused || currentStepIndex < 0 || currentStepIndex >= algoSnapshots.length) {
+      if (isRunning && currentStepIndex >= algoSnapshots.length) {
+        setIsRunning(false);
+      }
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCurrentStepIndex(p => p + 1);
+    }, Math.max(50, 500 - speed * 5));
+    return () => clearTimeout(timer);
+  }, [isRunning, isPaused, currentStepIndex, algoSnapshots, speed]);
+
+  useEffect(() => {
+    if (currentStepIndex >= 0 && algoSnapshots[currentStepIndex]) {
+      const snap = algoSnapshots[currentStepIndex];
+      setRegions(snap.regions);
+      setBacktracks(snap.backtracks);
+      setStepCount(currentStepIndex + 1);
+      setCurrentExplanation(snap.explanation);
+      if (currentStepIndex >= algoSnapshots.length - 1 && snap.explanation?.action === "Algorithm Complete") {
+        setIsComplete(true);
+      }
+    }
+  }, [currentStepIndex, algoSnapshots]);
+
+  const run = useCallback(() => {
+    setIsRunning(true);
+    setIsPaused(false);
+    setStepCount(0);
+    setBacktracks(0);
+    setIsComplete(false);
+    setCurrentExplanation(null);
+
+    const regs = [...regions].map(r => ({ ...r, color: -1 }));
     let bts = 0;
+    let expStep = 1;
+    const snapshots: MapSnapshot[] = [];
 
-    async function solve(idx: number): Promise<boolean> {
-      if (cancelRef.current) return false;
+    function solve(idx: number): boolean {
       if (idx === regs.length) return true;
 
       for (let c = 0; c < 4; c++) {
-        if (cancelRef.current) return false;
         // Check if color is safe
-        const safe = regs[idx].neighbors.every(n => regs[n].color !== c);
+        const safe = regs[idx].neighbors.every(n => {
+          const neighborCol = regs.find(r => r.id === n)?.color;
+          return neighborCol !== c;
+        });
         if (!safe) continue;
 
         regs[idx].color = c;
-        steps++;
-        setStepCount(steps);
-        setRegions([...regs]);
-        await new Promise(r => setTimeout(r, Math.max(50, 500 - speedRef.current * 5)));
+        snapshots.push({
+          regions: [...regs].map(r => ({...r})),
+          backtracks: bts,
+          explanation: {
+            step: expStep++,
+            action: `Assigned ${COLOR_NAMES[c]} to Region ${regs[idx].name}`,
+            reason: `Color ${COLOR_NAMES[c]} is valid. None of its adjacent neighbors have this color. Proceeding to the next region.`,
+            state: { region: regs[idx].name, assignedColor: COLOR_NAMES[c] }
+          }
+        });
 
-        if (await solve(idx + 1)) return true;
+        if (solve(idx + 1)) return true;
 
         // Backtrack
         regs[idx].color = -1;
         bts++;
-        setBacktracks(bts);
-        setRegions([...regs]);
-        await new Promise(r => setTimeout(r, Math.max(50, 300 - speedRef.current * 3)));
+        snapshots.push({
+          regions: [...regs].map(r => ({...r})),
+          backtracks: bts,
+          explanation: {
+            step: expStep++,
+            action: `Backtracking from Region ${regs[idx].name}`,
+            reason: `Dead end reached. The assignment of ${COLOR_NAMES[c]} led to an unsolvable state further down. Removing color and trying next available.`,
+            state: { region: regs[idx].name, revertedColor: COLOR_NAMES[c], totalBacktracks: bts }
+          }
+        });
       }
       return false;
     }
 
-    const solved = await solve(0);
-    setIsRunning(false);
-    setIsComplete(solved);
-  }, []);
+    const solved = solve(0);
+    
+    if (solved) {
+      snapshots.push({
+        regions: [...regs].map(r => ({...r})),
+        backtracks: bts,
+        explanation: {
+          step: expStep++,
+          action: "Algorithm Complete",
+          reason: "Successfully found a valid 4-coloring for the entire map.",
+          state: null
+        }
+      });
+    }
+
+    setAlgoSnapshots(snapshots);
+    setCurrentStepIndex(0);
+  }, [regions]);
 
   return (
     <div className="page-container">
@@ -142,13 +276,61 @@ const MapColoring = () => {
             <input type="range" min={1} max={100} value={speed} onChange={e => setSpeed(Number(e.target.value))} className="w-full mt-2 accent-primary" />
           </div>
 
-          <div className="flex flex-col gap-2">
-            <button onClick={run} disabled={isRunning} className="control-btn-primary flex items-center justify-center gap-2 disabled:opacity-50">
-              <Play className="w-4 h-4" /> Run Backtracking
-            </button>
-            <button onClick={reset} className="control-btn-secondary flex items-center justify-center gap-2">
-              <RotateCcw className="w-4 h-4" /> Reset
-            </button>
+          {/* Learning Mode */}
+          <div className="flex items-center justify-between border border-border p-3 rounded-md bg-secondary/30 mt-1">
+            <div>
+              <p className="section-label mb-1">Learning Mode</p>
+              <p className="text-[10px] text-muted-foreground mr-2">Show step-by-step reasoning</p>
+            </div>
+            <label className="flex items-center cursor-pointer select-none">
+              <div
+                onClick={() => !isRunning && setLearningMode(!learningMode)}
+                className={`w-10 h-6 rounded-full relative transition-colors ${learningMode ? "bg-primary" : "bg-primary/20"} ${isRunning ? "opacity-50" : ""}`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-foreground shadow transition-transform ${learningMode ? "translate-x-4" : ""}`} />
+              </div>
+            </label>
+          </div>
+
+          <div className="flex flex-col gap-2 mt-2">
+            {!isRunning && algoSnapshots.length === 0 ? (
+              <button onClick={run} className="control-btn-primary flex items-center justify-center gap-2">
+                <Play className="w-4 h-4" /> Run Backtracking
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => setIsPaused(p => !p)}
+                  className="control-btn-primary flex items-center justify-center gap-2"
+                >
+                  {isPaused || (!isRunning && currentStepIndex < algoSnapshots.length - 1) ? <><Play className="w-4 h-4" /> Resume</> : <><Pause className="w-4 h-4" /> Pause</>}
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.max(0, p - 1)); }}
+                    disabled={currentStepIndex <= 0}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipBack className="w-4 h-4" /> Step Back
+                  </button>
+                  <button
+                    onClick={() => { setIsPaused(true); setIsRunning(false); setCurrentStepIndex(p => Math.min(algoSnapshots.length - 1, p + 1)); }}
+                    disabled={currentStepIndex >= algoSnapshots.length - 1}
+                    className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <SkipForward className="w-4 h-4" /> Step Forward
+                  </button>
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 mt-1">
+              <button onClick={reset} disabled={isRunning} className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50">
+                <RotateCcw className="w-4 h-4" /> Default Map
+              </button>
+              <button onClick={generateRandom} disabled={isRunning} className="control-btn-secondary flex-1 flex items-center justify-center gap-2 disabled:opacity-50">
+                <Shuffle className="w-4 h-4" /> Random Map
+              </button>
+            </div>
           </div>
 
           <div>
@@ -178,10 +360,11 @@ const MapColoring = () => {
           </div>
         </aside>
 
-        <section className="relative flex items-center justify-center p-8">
-          <svg width="560" height="480" className="border border-border rounded-md bg-card/30">
+        <section className="relative flex flex-col items-center pt-8 p-8 overflow-auto">
+          <svg width="560" height="480" className="flex-shrink-0 border border-border rounded-md bg-card/30">
             {regions.map(region => (
-              <g key={region.id}>
+              <g key={region.id} style={{ cursor: isRunning || algoSnapshots.length > 0 ? "default" : "pointer" }} onClick={() => handleRegionClick(region.id)}>
+                {region.path ? (
                 <motion.path
                   d={region.path}
                   fill={region.color >= 0 ? COLORS[region.color] : "hsl(var(--secondary))"}
@@ -194,6 +377,19 @@ const MapColoring = () => {
                   }}
                   transition={{ duration: 0.3 }}
                 />
+                ) : (
+                <motion.circle
+                  cx={region.cx}
+                  cy={region.cy}
+                  r={25}
+                  fill={region.color >= 0 ? COLORS[region.color] : "hsl(var(--secondary))"}
+                  stroke="hsl(var(--border))"
+                  strokeWidth="2"
+                  initial={{ opacity: 0.5 }}
+                  animate={{ opacity: region.color >= 0 ? 0.9 : 0.5, fill: region.color >= 0 ? COLORS[region.color] : "hsl(var(--secondary))" }}
+                  transition={{ duration: 0.3 }}
+                />
+                )}
                 <text
                   x={region.cx}
                   y={region.cy}
@@ -227,6 +423,16 @@ const MapColoring = () => {
                 ))
             )}
           </svg>
+          
+          <div className="w-full max-w-[600px] mt-8 flex-shrink-0 flex flex-col gap-4">
+            <StepExplanationPanel 
+              explanation={currentExplanation}
+              learningMode={learningMode}
+              speechEnabled={speechEnabled}
+              onToggleSpeech={() => setSpeechEnabled(!speechEnabled)}
+            />
+            {learningMode && <StepHistoryPanel history={history} />}
+          </div>
         </section>
       </div>
     </div>

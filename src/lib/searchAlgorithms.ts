@@ -10,6 +10,11 @@ export interface AlgoStep {
   row: number;
   col: number;
   type: "visited" | "frontier" | "path";
+  explanation?: {
+    action: string;
+    reason: string;
+    state?: any;
+  };
 }
 
 export interface AlgoResult {
@@ -33,7 +38,13 @@ function reconstructPath(parent: Map<string, string>, end: string): AlgoStep[] {
   let cur = end;
   while (parent.has(cur)) {
     const [r, c] = cur.split(",").map(Number);
-    path.push({ row: r, col: c, type: "path" });
+    path.push({ 
+      row: r, col: c, type: "path",
+      explanation: {
+        action: `Tracing optimal path at (${r}, ${c})`,
+        reason: "Following parent pointers backwards from the goal to build the final path."
+      }
+    });
     cur = parent.get(cur)!;
   }
   return path.reverse();
@@ -54,14 +65,28 @@ export function bfs(grid: Grid, start: [number, number], goal: [number, number])
       const path = reconstructPath(parent, key(...goal));
       return { steps: [...steps, ...path], pathLength: path.length, nodesExplored: visited.size };
     }
-    steps.push({ row: r, col: c, type: "visited" });
+    steps.push({ 
+      row: r, col: c, type: "visited",
+      explanation: {
+        action: `Exploring node (${r}, ${c})`,
+        reason: "Queue ensures level-order traversal. This node was the oldest undiscovered neighbor in the queue (FIFO choice).",
+        state: { queueSize: queue.length, visitedCount: visited.size }
+      }
+    });
     for (const [dr, dc] of DIRS) {
       const nr = r + dr, nc = c + dc;
       if (isValid(grid, nr, nc) && !visited.has(key(nr, nc))) {
         visited.add(key(nr, nc));
         parent.set(key(nr, nc), key(r, c));
         queue.push([nr, nc]);
-        steps.push({ row: nr, col: nc, type: "frontier" });
+        steps.push({ 
+          row: nr, col: nc, type: "frontier",
+          explanation: {
+            action: `Discovered neighbor (${nr}, ${nc})`,
+            reason: "Node is a valid unvisited neighbor. Added to the back of the queue.",
+            state: { queueSize: queue.length, visitedCount: visited.size }
+          }
+        });
       }
     }
   }
@@ -78,7 +103,14 @@ export function dfs(grid: Grid, start: [number, number], goal: [number, number])
     const [r, c] = stack.pop()!;
     if (visited.has(key(r, c))) continue;
     visited.add(key(r, c));
-    steps.push({ row: r, col: c, type: "visited" });
+    steps.push({ 
+      row: r, col: c, type: "visited",
+      explanation: {
+        action: `Exploring node (${r}, ${c})`,
+        reason: "DFS explores deeper before backtracking. This node was just popped from the top of the stack (LIFO choice).",
+        state: { stackSize: stack.length, visitedCount: visited.size }
+      }
+    });
     if (r === goal[0] && c === goal[1]) {
       const path = reconstructPath(parent, key(...goal));
       return { steps: [...steps, ...path], pathLength: path.length, nodesExplored: visited.size };
@@ -88,6 +120,14 @@ export function dfs(grid: Grid, start: [number, number], goal: [number, number])
       if (isValid(grid, nr, nc) && !visited.has(key(nr, nc))) {
         parent.set(key(nr, nc), key(r, c));
         stack.push([nr, nc]);
+        steps.push({
+          row: nr, col: nc, type: "frontier",
+          explanation: {
+            action: `Pushed neighbor (${nr}, ${nc}) to stack`,
+            reason: "Valid neighbor added. It will be explored immediately on the next step.",
+            state: { stackSize: stack.length, visitedCount: visited.size }
+          }
+        });
       }
     }
   }
@@ -105,7 +145,16 @@ export function ucs(grid: Grid, start: [number, number], goal: [number, number])
     pq.sort((a, b) => a.cost - b.cost);
     const { r, c, cost } = pq.shift()!;
     if (cost > (dist.get(key(r, c)) ?? Infinity)) continue;
-    steps.push({ row: r, col: c, type: "visited" });
+    
+    steps.push({ 
+      row: r, col: c, type: "visited",
+      explanation: {
+        action: `Exploring node (${r}, ${c})`,
+        reason: `Node with smallest cumulative distance (${cost}) is chosen from the priority queue (greedy choice).`,
+        state: { currentCost: cost, pqSize: pq.length }
+      }
+    });
+
     if (r === goal[0] && c === goal[1]) {
       const path = reconstructPath(parent, key(...goal));
       return { steps: [...steps, ...path], pathLength: path.length, nodesExplored: dist.size };
@@ -117,7 +166,14 @@ export function ucs(grid: Grid, start: [number, number], goal: [number, number])
         dist.set(key(nr, nc), newCost);
         parent.set(key(nr, nc), key(r, c));
         pq.push({ r: nr, c: nc, cost: newCost });
-        steps.push({ row: nr, col: nc, type: "frontier" });
+        steps.push({ 
+          row: nr, col: nc, type: "frontier",
+          explanation: {
+            action: `Relaxing edge to (${nr}, ${nc})`,
+            reason: `Found a shorter path to this neighbor (cost: ${newCost}). Updated priority queue.`,
+            state: { neighborCost: newCost, pqSize: pq.length }
+          }
+        });
       }
     }
   }
@@ -131,9 +187,28 @@ export function dls(grid: Grid, start: [number, number], goal: [number, number],
 
   function dfsLimited(r: number, c: number, depth: number): boolean {
     visited.add(key(r, c));
-    steps.push({ row: r, col: c, type: "visited" });
+    steps.push({ 
+      row: r, col: c, type: "visited",
+      explanation: {
+        action: `Exploring node (${r}, ${c}) at depth ${depth}`,
+        reason: `DLS explores deeper recursively up to the depth limit (${limit}).`,
+        state: { currentDepth: depth, maxLimit: limit }
+      }
+    });
+    
     if (r === goal[0] && c === goal[1]) return true;
-    if (depth >= limit) return false;
+    if (depth >= limit) {
+      steps.push({
+        row: r, col: c, type: "visited",
+        explanation: {
+          action: `Hit depth limit (${limit}) at (${r}, ${c})`,
+          reason: "Search forced to backtrack to avoid infinite loops or exceeding bounded depth computations.",
+          state: { currentDepth: depth, maxLimit: limit }
+        }
+      });
+      return false;
+    }
+    
     for (const [dr, dc] of DIRS) {
       const nr = r + dr, nc = c + dc;
       if (isValid(grid, nr, nc) && !visited.has(key(nr, nc))) {
@@ -171,14 +246,24 @@ export function astar(grid: Grid, start: [number, number], goal: [number, number
     const { r, c } = openSet.shift()!;
     if (closedSet.has(key(r, c))) continue;
     closedSet.add(key(r, c));
-    steps.push({ row: r, col: c, type: "visited" });
+    
+    const g = gScore.get(key(r, c))!;
+    const h = heuristic(r, c, goal[0], goal[1]);
+    
+    steps.push({ 
+      row: r, col: c, type: "visited",
+      explanation: {
+        action: `Exploring node (${r}, ${c})`,
+        reason: `Node with lowest f-score = g(${g}) + h(${h}) = ${g+h} selected. The heuristic guides search towards the goal.`,
+        state: { fScore: g+h, gScore: g, hScore: h, openSetSize: openSet.length }
+      }
+    });
 
     if (r === goal[0] && c === goal[1]) {
       const path = reconstructPath(parent, key(...goal));
       return { steps: [...steps, ...path], pathLength: path.length, nodesExplored: closedSet.size };
     }
 
-    const g = gScore.get(key(r, c))!;
     for (const [dr, dc] of DIRS) {
       const nr = r + dr, nc = c + dc;
       if (!isValid(grid, nr, nc) || closedSet.has(key(nr, nc))) continue;
@@ -186,8 +271,17 @@ export function astar(grid: Grid, start: [number, number], goal: [number, number
       if (ng < (gScore.get(key(nr, nc)) ?? Infinity)) {
         gScore.set(key(nr, nc), ng);
         parent.set(key(nr, nc), key(r, c));
-        openSet.push({ r: nr, c: nc, f: ng + heuristic(nr, nc, goal[0], goal[1]) });
-        steps.push({ row: nr, col: nc, type: "frontier" });
+        const nh = heuristic(nr, nc, goal[0], goal[1]);
+        const nf = ng + nh;
+        openSet.push({ r: nr, c: nc, f: nf });
+        steps.push({ 
+          row: nr, col: nc, type: "frontier",
+          explanation: {
+            action: `Evaluated neighbor (${nr}, ${nc})`,
+            reason: `Calculated f-score: g(${ng}) + h(${nh}) = ${nf}. Added to open set priority queue.`,
+            state: { fScore: nf, gScore: ng, hScore: nh, openSetSize: openSet.length }
+          }
+        });
       }
     }
   }
